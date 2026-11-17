@@ -107,6 +107,15 @@ def test_cached_binary_skips_download(isolated_env: Path, monkeypatch: pytest.Mo
     assert rhwp_install.ensure_rhwp(allow_download=True) == cached.resolve()
 
 
+def test_pinned_sha256_covers_all_assets():
+    expected_assets = set(rhwp_install._ASSET_MAP.values())
+    assert expected_assets <= set(rhwp_install._PINNED_SHA256.keys())
+    for asset in expected_assets:
+        digest = rhwp_install._PINNED_SHA256[asset]
+        assert len(digest) == 64
+        assert all(c in "0123456789abcdef" for c in digest)
+
+
 def test_install_from_fake_zip(isolated_env: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rhwp_install.sys, "platform", "win32")
     monkeypatch.setattr(rhwp_install.platform, "system", lambda: "Windows")
@@ -115,11 +124,9 @@ def test_install_from_fake_zip(isolated_env: Path, monkeypatch: pytest.MonkeyPat
     asset = f"rhwp-{rhwp_install.RHWP_VERSION}-windows-x86_64.zip"
     zip_bytes = _make_zip({"rhwp/rhwp.exe": b"fake-win-exe", "rhwp/README.md": b"hi"})
     digest = hashlib.sha256(zip_bytes).hexdigest()
-    sums = f"{digest}  {asset}\n".encode("utf-8")
+    monkeypatch.setitem(rhwp_install._PINNED_SHA256, asset, digest)
 
     def fake_urlopen(url: str, timeout: float = 60):
-        if url.endswith("/SHA256SUMS.txt"):
-            return _FakeResponse(sums)
         if url.endswith(f"/{asset}"):
             return _FakeResponse(zip_bytes)
         raise AssertionError(f"Unexpected URL: {url}")
@@ -140,11 +147,9 @@ def test_install_from_fake_targz(isolated_env: Path, monkeypatch: pytest.MonkeyP
     asset = f"rhwp-{rhwp_install.RHWP_VERSION}-linux-x86_64.tar.gz"
     tar_bytes = _make_targz({"rhwp/rhwp": b"fake-linux-bin"})
     digest = hashlib.sha256(tar_bytes).hexdigest()
-    sums = f"{digest}  {asset}\n".encode("utf-8")
+    monkeypatch.setitem(rhwp_install._PINNED_SHA256, asset, digest)
 
     def fake_urlopen(url: str, timeout: float = 60):
-        if url.endswith("/SHA256SUMS.txt"):
-            return _FakeResponse(sums)
         if url.endswith(f"/{asset}"):
             return _FakeResponse(tar_bytes)
         raise AssertionError(f"Unexpected URL: {url}")
@@ -164,14 +169,11 @@ def test_sha256_mismatch_leaves_cache_empty(isolated_env: Path, monkeypatch: pyt
     monkeypatch.setattr(rhwp_install.platform, "machine", lambda: "AMD64")
 
     asset = f"rhwp-{rhwp_install.RHWP_VERSION}-windows-x86_64.zip"
-    zip_bytes = _make_zip({"rhwp/rhwp.exe": b"fake-win-exe"})
-    wrong_sums = f"{'0' * 64}  {asset}\n".encode("utf-8")
+    tampered_bytes = _make_zip({"rhwp/rhwp.exe": b"tampered-win-exe"})
 
     def fake_urlopen(url: str, timeout: float = 60):
-        if url.endswith("/SHA256SUMS.txt"):
-            return _FakeResponse(wrong_sums)
         if url.endswith(f"/{asset}"):
-            return _FakeResponse(zip_bytes)
+            return _FakeResponse(tampered_bytes)
         raise AssertionError(f"Unexpected URL: {url}")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -193,12 +195,12 @@ def test_path_traversal_and_symlink_rejected(isolated_env: Path, monkeypatch: py
         _make_zip({"rhwp/rhwp.exe": b"ok"}, symlinks={"rhwp/link": "/etc/passwd"}),
     ):
         digest = hashlib.sha256(bad_zip).hexdigest()
-        sums = f"{digest}  {asset}\n".encode("utf-8")
+        monkeypatch.setitem(rhwp_install._PINNED_SHA256, asset, digest)
 
-        def fake_urlopen(url: str, timeout: float = 60, data=bad_zip, s=sums):
-            if url.endswith("/SHA256SUMS.txt"):
-                return _FakeResponse(s)
-            return _FakeResponse(data)
+        def fake_urlopen(url: str, timeout: float = 60, data=bad_zip):
+            if url.endswith(f"/{asset}"):
+                return _FakeResponse(data)
+            raise AssertionError(f"Unexpected URL: {url}")
 
         monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
         with pytest.raises(ValueError):

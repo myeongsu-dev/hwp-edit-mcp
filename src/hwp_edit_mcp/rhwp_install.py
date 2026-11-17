@@ -16,7 +16,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
-RHWP_VERSION = "v0.9.0"
+RHWP_VERSION = "v0.9.0"  # 버전을 올리면 _PINNED_SHA256도 함께 바꿀 것
 RELEASE_BASE_URL = f"https://github.com/edwardkim/rhwp/releases/download/{RHWP_VERSION}"
 DOWNLOAD_TIMEOUT = 60
 
@@ -26,6 +26,14 @@ _ASSET_MAP = {
     ("linux", "aarch64"): f"rhwp-{RHWP_VERSION}-linux-aarch64.tar.gz",
     ("darwin", "x86_64"): f"rhwp-{RHWP_VERSION}-macos-x86_64.tar.gz",
     ("darwin", "aarch64"): f"rhwp-{RHWP_VERSION}-macos-aarch64.tar.gz",
+}
+
+_PINNED_SHA256 = {
+    "rhwp-v0.9.0-linux-aarch64.tar.gz": "11b19a5e060621e517525b7818dc44d69dbf1cc16355fdf85f7e5a57f2e2c3ee",
+    "rhwp-v0.9.0-linux-x86_64.tar.gz": "837910d858162537f3f04b35ae8f5ad65fb42cc8e3582b1e174ce605b6ac7952",
+    "rhwp-v0.9.0-macos-aarch64.tar.gz": "5993462a26878b1e8c39cd93c2515d9c373d10e617d9e3ff7e8b9336efb11974",
+    "rhwp-v0.9.0-macos-x86_64.tar.gz": "488ccd4d93950101ed52e8b297872e3de839ebb6804ba8f75cbcd59f7b64f91f",
+    "rhwp-v0.9.0-windows-x86_64.zip": "72a0c7122a07c46bd67872688057f99ff60c5240333c72ca8b4c5c5b6884ef6f",
 }
 
 
@@ -83,22 +91,6 @@ def _download_bytes(url: str, timeout: float = DOWNLOAD_TIMEOUT) -> bytes:
         raise RuntimeError(f"rhwp 다운로드 실패 ({url}): {exc}") from exc
 
 
-def _parse_sha256sums(text: str, asset: str) -> str:
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        digest, name = parts[0], parts[1].lstrip("*").strip()
-        if name.startswith("./"):
-            name = name[2:]
-        if name == asset or Path(name).name == asset:
-            return digest.lower()
-    raise RuntimeError(f"SHA256SUMS.txt에서 '{asset}' 항목을 찾을 수 없습니다.")
-
-
 def _validate_member_path(name: str, dest_dir: Path) -> None:
     norm = name.replace("\\", "/")
     if not norm or norm.startswith("/") or (len(norm) >= 2 and norm[1] == ":"):
@@ -133,11 +125,9 @@ def _safe_extract(archive_path: Path, dest_dir: Path, is_zip: bool) -> None:
 
 def _download_and_install(target_dir: Path, exe_name: str) -> Path:
     asset = _select_asset()
-    sums_url = f"{RELEASE_BASE_URL}/SHA256SUMS.txt"
     asset_url = f"{RELEASE_BASE_URL}/{asset}"
 
-    sums_text = _download_bytes(sums_url).decode("utf-8", errors="replace")
-    expected_sha = _parse_sha256sums(sums_text, asset)
+    expected_sha = _PINNED_SHA256[asset].lower()
     archive_bytes = _download_bytes(asset_url)
 
     actual_sha = hashlib.sha256(archive_bytes).hexdigest().lower()
