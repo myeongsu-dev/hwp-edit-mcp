@@ -61,6 +61,10 @@ claude mcp add -s user hwp -- uvx hwp-edit-mcp
 
 `rhwp`는 `mcp-serve` 명령으로 저수준 HWP/HWPX 파싱·편집 도구를 제공합니다. `hwp-edit-mcp`는 `rhwp mcp-serve`를 상주 하위 프로세스로 감싸면서, 에이전트 실수나 덮어쓰기로부터 문서를 보호하는 `SafeWriter`(해시 충돌 검사, 스냅샷 백업·복원·diff, 재열기 무손실 검증, 원자 교체), 라벨 기반 표 셀 채우기, 허용 폴더(`--root`) 및 읽기 전용(`--read-only`) 가드, 응답 길이 제한(`max_chars`), 자동 `rhwp` 설치·캐싱을 더합니다.
 
+## 감사의 말
+
+이 프로젝트는 [jkf87/hwp-mcp](https://github.com/jkf87/hwp-mcp)에서 출발했습니다. "AI 에이전트가 MCP로 한글 문서를 다룬다"는 아이디어와 처음 구조는 jkf87 님의 저장소에서 왔습니다. 그 저장소를 포크해 쓰다가, 한컴오피스 없이 여러 OS에서 돌아가도록 [rhwp](https://github.com/edwardkim/rhwp) 엔진 기반으로 새로 작성해 독립 프로젝트가 되었습니다. 길을 먼저 열어 주신 jkf87 님과 rhwp를 만든 edwardkim 님께 감사드립니다.
+
 ## 라이선스
 
 `hwp-edit-mcp`는 [MIT License](LICENSE)로 배포됩니다. 런타임에 사용하는 `rhwp`의 MIT 라이선스 고지는 [NOTICE](NOTICE)를 확인하세요.

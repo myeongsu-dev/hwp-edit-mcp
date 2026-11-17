@@ -61,6 +61,10 @@ Every write tool runs inside a `SafeWriter` transaction:
 
 `hwp-edit-mcp` wraps `rhwp mcp-serve` as a persistent stdio backend and adds `SafeWriter` (hash-conflict detection, snapshot history/restore/diff, reopen verification, atomic replace), label-based table cell filling, `--root` / `--read-only` guards, response size capping, and automatic `rhwp` installation.
 
+## Acknowledgments
+
+This project began as a fork of [jkf87/hwp-mcp](https://github.com/jkf87/hwp-mcp). The idea of letting AI agents work with Hangul documents over MCP, and the initial structure, came from jkf87's repository. It was later rewritten on the [rhwp](https://github.com/edwardkim/rhwp) engine so it runs on any OS without Hancom Office, and became an independent project. Many thanks to jkf87 for paving the way and to edwardkim for rhwp.
+
 ## License
 
 `hwp-edit-mcp` is licensed under the [MIT License](LICENSE). See [NOTICE](NOTICE) for `rhwp` MIT license attribution.
