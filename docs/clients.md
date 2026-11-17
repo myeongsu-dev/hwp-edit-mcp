@@ -58,7 +58,10 @@ command = "uvx"
 args = ["hwp-edit-mcp"]
 startup_timeout_sec = 30
 tool_timeout_sec = 60
+default_tools_approval_mode = "approve"
 ```
+
+Codex는 쓰기 도구(`destructiveHint`)를 부를 때 승인을 요구합니다. `codex exec`처럼 승인 창이 없는 실행에서는 `default_tools_approval_mode = "approve"`가 있어야 쓰기 도구가 실행됩니다. 대화형으로 쓰면서 매번 확인받고 싶으면 이 줄을 뺍니다.
 
 ## Grok CLI
 
@@ -152,14 +155,16 @@ tool_timeout_sec = 60
 
 ## 검증 결과
 
+시나리오: `hwp_info` → `hwp_fill_cells`(라벨 "성명") → `hwp_get_text`로 확인 → `hwp_history` → `hwp_restore` → `hwp_get_text`로 원상 복구 확인. 끝난 뒤 문서 해시가 원본과 같고 스냅샷이 2개 생겼는지로 판정했습니다. (Windows 11, 샘플 `tests/fixtures/sample_form.hwp`)
+
 | 에이전트 | 버전 | 날짜 | 결과 |
 | :--- | :--- | :--- | :--- |
-| Claude Code | — | — | 검증 예정 |
+| Claude Code | 2.1.326 | 2026-11-17 | 통과 |
+| Codex | 0.169.0 | 2026-11-17 | 통과 (`default_tools_approval_mode = "approve"` 필요) |
+| Grok CLI | 1.0.88 | 2026-11-17 | 통과 |
+| Antigravity (AGY) | 1.5.10 | 2026-11-17 | 통과 |
+| Gemini CLI | 0.68.0 | 2026-11-17 | 통과 |
+| OpenCode | 2.3.0 | 2026-11-17 | 통과 |
 | Claude Desktop | — | — | 검증 예정 |
-| Codex | — | — | 검증 예정 |
-| Grok CLI | — | — | 검증 예정 |
-| Antigravity (AGY) | — | — | 검증 예정 |
-| Gemini CLI | — | — | 검증 예정 |
-| OpenCode | — | — | 검증 예정 |
 | Cursor | — | — | 검증 예정 |
 | VS Code | — | — | 검증 예정 |
