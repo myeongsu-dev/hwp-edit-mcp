@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-
-DEFAULT_RHWP = "D:/40_Tools/rhwp/rhwp/rhwp.exe"
 
 SCAFFOLD_SPEC = {
     "version": "1",
@@ -32,10 +28,9 @@ SCAFFOLD_SPEC = {
 
 
 def resolve_rhwp(explicit: str | None = None) -> Path:
-    for cand in (explicit, os.environ.get("RHWP_EXE"), shutil.which("rhwp"), DEFAULT_RHWP):
-        if cand and Path(cand).is_file():
-            return Path(cand).resolve()
-    raise FileNotFoundError("rhwp 실행 파일을 찾을 수 없습니다. --rhwp 또는 RHWP_EXE 를 지정하세요.")
+    from hwp_edit_mcp.rhwp_install import ensure_rhwp
+
+    return ensure_rhwp(explicit)
 
 
 def build_fixtures(rhwp_exe: Path, out_dir: Path) -> tuple[Path, Path]:

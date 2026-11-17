@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for hwp-mcp tests."""
+"""Shared pytest fixtures for hwp-edit-mcp tests."""
 
 import os
 import shutil
@@ -34,16 +34,17 @@ def sample_hwpx_copy(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def personal_hwp_copy(tmp_path: Path) -> Path:
-    samples_dir = get_samples_dir()
-    if not samples_dir.is_dir():
-        pytest.skip(f"HWP_TEST_SAMPLES directory not found: {samples_dir}")
-
-    preferred = samples_dir / "포텐10팀_미션맵_주문신청서.hwp"
-    if not preferred.is_file():
-        hwp_files = sorted(samples_dir.glob("*.hwp"))
+    # HWP_TEST_SAMPLES may point to one .hwp file or to a folder (first *.hwp is used).
+    samples = get_samples_dir()
+    if samples.is_file():
+        preferred = samples
+    elif samples.is_dir():
+        hwp_files = sorted(samples.glob("*.hwp"))
         if not hwp_files:
-            pytest.skip(f"No .hwp sample files in: {samples_dir}")
+            pytest.skip(f"No .hwp sample files in: {samples}")
         preferred = hwp_files[0]
+    else:
+        pytest.skip(f"HWP_TEST_SAMPLES not found: {samples}")
 
     dst = tmp_path / preferred.name
     shutil.copy2(preferred, dst)
