@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+*.log
+REPORT.md
+
+# personal documents and server side-effects
+tests/local_samples/
+.hwp-mcp-history/
+.hwp-mcp-render/
+.hwp-mcp-tmp-*

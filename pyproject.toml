@@ -1,0 +1,37 @@
+[project]
+name = "hwp-edit-mcp"
+dynamic = ["version"]
+description = "Safe HWP/HWPX editing MCP server for AI agents: hash-checked, snapshot-backed, verified writes (rhwp engine)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Myeongsu Park" }]
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.10,<2"]
+keywords = ["mcp", "hwp", "hwpx", "hangul", "rhwp", "korean", "document"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Natural Language :: Korean",
+    "Topic :: Office/Business :: Office Suites",
+]
+
+[project.urls]
+Homepage = "https://github.com/myeongsu-dev/hwp-edit-mcp"
+Issues = "https://github.com/myeongsu-dev/hwp-edit-mcp/issues"
+
+[project.scripts]
+hwp-edit-mcp = "hwp_edit_mcp.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=7.3", "olefile>=0.46"]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/hwp_edit_mcp/__init__.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
