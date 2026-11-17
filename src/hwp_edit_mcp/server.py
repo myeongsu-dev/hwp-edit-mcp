@@ -3,19 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import difflib
 import json
 import logging
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
 import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
-from mcp.types import ErrorData, JSONRPCError, JSONRPCMessage, JSONRPCRequest, METHOD_NOT_FOUND
+from mcp.types import (
+    ErrorData,
+    JSONRPCError,
+    JSONRPCMessage,
+    JSONRPCRequest,
+    METHOD_NOT_FOUND,
+    ToolAnnotations,
+)
+from typing_extensions import Required, TypedDict
 
 from hwp_edit_mcp.rhwp_backend import RhwpBackend, RhwpError
 from hwp_edit_mcp.safe_writer import SafeWriteError, SafeWriter
@@ -23,47 +32,101 @@ from hwp_edit_mcp.safe_writer import SafeWriteError, SafeWriter
 logger = logging.getLogger("hwp-edit-mcp.server")
 
 DEFAULT_MAX_CHARS = 20000
-
-WRITE_TOOL_PREFIXES = (
-    "hwp_set_",
-    "hwp_insert_",
-    "hwp_delete_",
-    "hwp_merge_",
-    "hwp_split_",
-    "hwp_replace_",
-    "hwp_fill_",
-    "hwp_apply_",
-    "hwp_fit_",
-    "hwp_resize_",
-    "hwp_move_",
-    "hwp_transpose_",
+TRUNCATE_HINT = (
+    "응답이 max_chars 제한을 초과해 잘렸습니다. "
+    "page, table_index 또는 max_chars 인자로 범위를 좁혀 조회하세요."
 )
-WRITE_TOOL_NAMES = {
-    "hwp_csv_to_table",
-    "hwp_run_plan",
-    "hwp_redact",
-    "hwp_sanitize",
-    "hwp_table_from_csv",
-}
 
 
-def _is_write_tool(tool_name: str, is_write_flag: bool) -> bool:
-    if is_write_flag:
-        return True
-    if tool_name in WRITE_TOOL_NAMES:
-        return True
-    return tool_name.startswith(WRITE_TOOL_PREFIXES)
+class CellInput(TypedDict, total=False):
+    text: Required[str]
+    label: str
+    direction: Literal["right", "below"]
+    occurrence: int
+    row: int
+    col: int
+    table: int
+    keep_style: bool
 
 
 def _json_dumps(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-def _resolve_existing_file(file_path: str) -> Path:
-    p = Path(file_path).expanduser().resolve()
-    if not p.is_file():
-        raise FileNotFoundError(f"파일을 찾을 수 없습니다: {p}")
-    return p
+def _simplify_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Inline $ref/$defs and collapse anyOf:[X, {type: null}] for MCP client compatibility."""
+    root = copy.deepcopy(schema)
+    defs: Dict[str, Any] = root.pop("$defs", {}) or {}
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, list):
+            return [_walk(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+
+        if "$ref" in node and isinstance(node["$ref"], str):
+            ref = node["$ref"]
+            if ref.startswith("#/$defs/"):
+                name = ref[len("#/$defs/") :]
+                if name in defs:
+                    resolved = _walk(copy.deepcopy(defs[name]))
+                    if isinstance(resolved, dict):
+                        siblings = {k: _walk(v) for k, v in node.items() if k != "$ref"}
+                        resolved.update(siblings)
+                        node = resolved
+
+        result: Dict[str, Any] = {}
+        for k, v in node.items():
+            result[k] = _walk(v)
+
+        any_of = result.get("anyOf")
+        if isinstance(any_of, list):
+            non_null = [b for b in any_of if b != {"type": "null"}]
+            if len(non_null) < len(any_of):
+                if result.get("default") is None:
+                    result.pop("default", None)
+                if len(non_null) == 1 and isinstance(non_null[0], dict):
+                    result.pop("anyOf")
+                    merged = dict(non_null[0])
+                    merged.update(result)
+                    result = merged
+                else:
+                    result["anyOf"] = non_null
+
+        return result
+
+    return _walk(root)
+
+
+def _limit_response(data: Any, limit: int) -> str:
+    """Serialize data as JSON and truncate with metadata if it exceeds `limit` chars."""
+    text = _json_dumps(data)
+    if limit <= 0 or len(text) <= limit:
+        return text
+
+    if isinstance(data, dict):
+        for key in ("content", "diff", "text"):
+            val = data.get(key)
+            if isinstance(val, str):
+                trimmed = dict(data)
+                trimmed["truncated"] = True
+                trimmed["hint"] = TRUNCATE_HINT
+                trimmed[key] = ""
+                overhead = len(_json_dumps(trimmed))
+                budget = max(0, limit - overhead)
+                trimmed[key] = val[:budget]
+                return _json_dumps(trimmed)
+
+    payload: Dict[str, Any] = {
+        "truncated": True,
+        "total_chars": len(text),
+        "hint": TRUNCATE_HINT,
+        "partial_json": "",
+    }
+    overhead = len(_json_dumps(payload))
+    budget = max(0, limit - overhead)
+    payload["partial_json"] = text[:budget]
+    return _json_dumps(payload)
 
 
 def create_server(
@@ -76,6 +139,35 @@ def create_server(
     """Create and configure the FastMCP server, backend, and SafeWriter."""
     rhwp = backend or RhwpBackend()
     writer = SafeWriter(rhwp)
+    server_max_chars = max_chars
+    resolved_roots = [Path(r).expanduser().resolve() for r in roots if str(r).strip()]
+    output_tools_cache: Optional[set[str]] = None
+
+    def _resolve_path(path: str, *, must_exist: bool = True) -> Path:
+        raw = Path(path).expanduser()
+        if not raw.is_absolute():
+            p = (resolved_roots[0] / raw).resolve() if resolved_roots else raw.resolve()
+        else:
+            p = raw.resolve()
+
+        if resolved_roots and not any(p.is_relative_to(r) for r in resolved_roots):
+            allowed = ", ".join(str(r) for r in resolved_roots)
+            raise PermissionError(f"접근이 허용되지 않은 경로입니다: {p} (허용 폴더: {allowed})")
+
+        if must_exist and not p.is_file():
+            raise FileNotFoundError(f"파일을 찾을 수 없습니다: {p}")
+        return p
+
+    async def _get_output_tools() -> set[str]:
+        nonlocal output_tools_cache
+        if output_tools_cache is None:
+            tools = await rhwp.list_tools()
+            output_tools_cache = {
+                t["name"]
+                for t in tools
+                if "output" in (t.get("inputSchema") or {}).get("properties", {})
+            }
+        return output_tools_cache
 
     mcp = FastMCP(
         "hwp-edit-mcp",
@@ -86,11 +178,24 @@ def create_server(
         ),
     )
 
+    write_tool = mcp.tool if not read_only else (lambda **kw: (lambda f: f))
+    _ro_ann = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+    _rw_ann = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False)
+    _render_ann = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
+    _rhwp_ann = (
+        ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
+        if read_only
+        else _rw_ann
+    )
+
     @mcp.tool(
-        description="HWP/HWPX 문서의 메타데이터(형식, 페이지 수, 문단 수, 글꼴, SHA-256 해시 등)를 조회합니다."
+        title="문서 정보 조회",
+        description="HWP/HWPX 문서의 메타데이터(형식, 페이지 수, 문단 수, 글꼴, SHA-256 해시 등)를 조회합니다. file_path는 절대 경로 권장.",
+        annotations=_ro_ann,
+        structured_output=False,
     )
     async def hwp_info(file_path: str, password: Optional[str] = None) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
         sha = writer.record_seen(target)
         info = await rhwp.call_tool("hwp_info", {"path": str(target), "password": password})
         if isinstance(info, dict):
@@ -99,7 +204,10 @@ def create_server(
         return _json_dumps(info)
 
     @mcp.tool(
-        description="HWP/HWPX 문서의 본문 텍스트를 추출합니다. format='text' 또는 'markdown'을 지원합니다."
+        title="문서 본문 추출",
+        description="HWP/HWPX 문서의 본문 텍스트를 추출합니다. format='text' 또는 'markdown'을 지원합니다. file_path는 절대 경로 권장.",
+        annotations=_ro_ann,
+        structured_output=False,
     )
     async def hwp_get_text(
         file_path: str,
@@ -108,11 +216,13 @@ def create_server(
         max_chars: Optional[int] = None,
         password: Optional[str] = None,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
         writer.record_seen(target)
         fmt = format.lower().strip()
         if fmt not in ("text", "markdown"):
             raise ValueError("format 은 'text' 또는 'markdown' 이어야 합니다.")
+
+        limit = max_chars if (max_chars is not None and max_chars > 0) else server_max_chars
 
         if fmt == "markdown":
             with tempfile.TemporaryDirectory() as td:
@@ -133,15 +243,14 @@ def create_server(
                     for md_p in sorted(Path(td).glob("*.md")):
                         chunks.append(md_p.read_text(encoding="utf-8"))
                 content = "\n\n".join(chunks)
-                if max_chars is not None and max_chars > 0:
-                    content = content[:max_chars]
-                return _json_dumps(
+                return _limit_response(
                     {
                         "file_path": str(target),
                         "format": "markdown",
                         "pageCount": res.get("pageCount") if isinstance(res, dict) else None,
                         "content": content,
-                    }
+                    },
+                    limit,
                 )
         else:
             res = await rhwp.call_tool(
@@ -156,10 +265,13 @@ def create_server(
             if isinstance(res, dict):
                 res["file_path"] = str(target)
                 res["format"] = "text"
-            return _json_dumps(res)
+            return _limit_response(res, limit)
 
     @mcp.tool(
-        description="문서 내에서 특정 문자열을 검색하여 페이지 번호, 문맥, 표 셀 좌표를 반환합니다."
+        title="문서 문자열 검색",
+        description="문서 내에서 특정 문자열을 검색하여 페이지 번호, 문맥, 표 셀 좌표를 반환합니다. file_path는 절대 경로 권장.",
+        annotations=_ro_ann,
+        structured_output=False,
     )
     async def hwp_search(
         file_path: str,
@@ -167,23 +279,26 @@ def create_server(
         context: Optional[int] = None,
         password: Optional[str] = None,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
         writer.record_seen(target)
         res = await rhwp.call_tool(
             "hwp_search",
             {"path": str(target), "query": query, "context": context, "password": password},
         )
-        return _json_dumps(res)
+        return _limit_response(res, server_max_chars)
 
     @mcp.tool(
-        description="문서 내 표(Table)의 행/열 크기, 병합 정보, 각 셀의 좌표(row, col) 및 텍스트를 반환합니다. table_index(0부터 시작)로 특정 표만 조회할 수 있습니다."
+        title="문서 표 조회",
+        description="문서 내 표(Table)의 행/열 크기, 병합 정보, 각 셀의 좌표(row, col) 및 텍스트를 반환합니다. table_index(0부터 시작)로 특정 표만 조회할 수 있습니다. file_path는 절대 경로 권장.",
+        annotations=_ro_ann,
+        structured_output=False,
     )
     async def hwp_table_view(
         file_path: str,
         table_index: Optional[int] = None,
         password: Optional[str] = None,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
         writer.record_seen(target)
         res = await rhwp.call_tool(
             "hwp_export_tables",
@@ -201,27 +316,30 @@ def create_server(
                 "table_index": table_index,
                 "table": tables[table_index],
             }
-        return _json_dumps(res)
+        return _limit_response(res, server_max_chars)
 
-    @mcp.tool(
+    @write_tool(
+        title="표 셀 채우기",
         description=(
             "표의 셀 값을 일괄 채웁니다. 각 항목은 좌표 기준({'row': 0, 'col': 1, 'text': '값'}) "
             "또는 라벨 기준({'label': '성명', 'text': '홍길동', 'direction': 'right'|'below'})을 지원합니다. "
             "라벨 기준에서 표 번호('table' 또는 table_index)를 생략하면 모든 표를 앞에서부터 찾아 첫 일치를 씁니다. "
             "좌표 기준에서 표 번호를 생략하면 0번 표입니다. "
-            "SafeWriter를 통해 스냅샷 백업 및 무손실 검증 후 원자 교체합니다."
-        )
+            "SafeWriter를 통해 스냅샷 백업 및 무손실 검증 후 원자 교체합니다. file_path는 절대 경로 권장."
+        ),
+        annotations=_rw_ann,
+        structured_output=False,
     )
     async def hwp_fill_cells(
         file_path: str,
-        cells: List[Dict[str, Any]],
+        cells: List[CellInput],
         table_index: Optional[int] = None,
         expected_sha256: Optional[str] = None,
         force: bool = False,
         allow_loss: bool = False,
         password: Optional[str] = None,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
         if not cells:
             raise ValueError("cells 목록이 비어 있습니다.")
 
@@ -339,8 +457,11 @@ def create_server(
         result["resolved_cells"] = resolved_ops
         return _json_dumps(result)
 
-    @mcp.tool(
-        description="문서 본문 및 표 셀 내의 텍스트를 찾아 일괄 치환합니다. SafeWriter를 경유합니다."
+    @write_tool(
+        title="텍스트 일괄 치환",
+        description="문서 본문 및 표 셀 내의 텍스트를 찾아 일괄 치환합니다. SafeWriter를 경유합니다. file_path는 절대 경로 권장.",
+        annotations=_rw_ann,
+        structured_output=False,
     )
     async def hwp_replace_text(
         file_path: str,
@@ -351,7 +472,7 @@ def create_server(
         allow_loss: bool = False,
         password: Optional[str] = None,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
 
         async def _do_write(src: Path, tmp_out: Path) -> Dict[str, Any]:
             return await rhwp.call_tool(
@@ -374,8 +495,11 @@ def create_server(
         )
         return _json_dumps(result)
 
-    @mcp.tool(
-        description="문서 내 누름틀(필드) 값을 이름 기준으로 채웁니다. SafeWriter를 경유합니다."
+    @write_tool(
+        title="누름틀 필드 채우기",
+        description="문서 내 누름틀(필드) 값을 이름 기준으로 채웁니다. SafeWriter를 경유합니다. file_path는 절대 경로 권장.",
+        annotations=_rw_ann,
+        structured_output=False,
     )
     async def hwp_fill_fields(
         file_path: str,
@@ -385,7 +509,7 @@ def create_server(
         allow_loss: bool = False,
         password: Optional[str] = None,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
 
         async def _do_write(src: Path, tmp_out: Path) -> Dict[str, Any]:
             return await rhwp.call_tool(
@@ -407,8 +531,11 @@ def create_server(
         )
         return _json_dumps(result)
 
-    @mcp.tool(
-        description="지정한 섹션/문단/문자 오프셋 위치에 텍스트를 삽입합니다. SafeWriter를 경유합니다."
+    @write_tool(
+        title="텍스트 삽입",
+        description="지정한 섹션/문단/문자 오프셋 위치에 텍스트를 삽입합니다. SafeWriter를 경유합니다. file_path는 절대 경로 권장.",
+        annotations=_rw_ann,
+        structured_output=False,
     )
     async def hwp_insert_text(
         file_path: str,
@@ -420,7 +547,7 @@ def create_server(
         force: bool = False,
         allow_loss: bool = False,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
 
         async def _do_write(src: Path, tmp_out: Path) -> Dict[str, Any]:
             return await rhwp.call_tool(
@@ -444,8 +571,11 @@ def create_server(
         )
         return _json_dumps(result)
 
-    @mcp.tool(
-        description="rhwp 선언적 편집 계획서(plan JSON)를 일괄 실행합니다. input/output 경로는 SafeWriter가 안전하게 바인딩합니다."
+    @write_tool(
+        title="편집 계획 실행",
+        description="rhwp 선언적 편집 계획서(plan JSON)를 일괄 실행합니다. input/output 경로는 SafeWriter가 안전하게 바인딩합니다. file_path는 절대 경로 권장.",
+        annotations=_rw_ann,
+        structured_output=False,
     )
     async def hwp_run_plan(
         file_path: str,
@@ -454,7 +584,7 @@ def create_server(
         force: bool = False,
         allow_loss: bool = False,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
 
         async def _do_write(src: Path, tmp_out: Path) -> Dict[str, Any]:
             bound_plan = dict(plan)
@@ -474,7 +604,10 @@ def create_server(
         return _json_dumps(result)
 
     @mcp.tool(
-        description="문서 페이지를 PNG 또는 SVG 이미지 파일로 렌더링하여 저장 경로를 반환합니다(시각 확인용). page는 0부터 시작하며, -1이면 전체 페이지를 렌더합니다."
+        title="페이지 이미지 렌더링",
+        description="문서 페이지를 PNG 또는 SVG 이미지 파일로 렌더링하여 저장 경로를 반환합니다(시각 확인용). page는 0부터 시작하며, -1이면 전체 페이지를 렌더합니다. file_path는 절대 경로 권장.",
+        annotations=_render_ann,
+        structured_output=False,
     )
     async def hwp_render_page(
         file_path: str,
@@ -482,13 +615,13 @@ def create_server(
         format: str = "png",
         output_dir: Optional[str] = None,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
         fmt = format.lower().strip()
         if fmt not in ("png", "svg"):
             raise ValueError("format 은 'png' 또는 'svg' 이어야 합니다.")
 
         out_path = (
-            Path(output_dir).expanduser().resolve()
+            _resolve_path(output_dir, must_exist=False)
             if output_dir
             else (target.parent / ".hwp-mcp-render" / target.stem)
         )
@@ -513,10 +646,13 @@ def create_server(
         )
 
     @mcp.tool(
-        description="문서의 SafeWriter 스냅샷 히스토리(.hwp-mcp-history) 목록을 최신순으로 조회합니다."
+        title="스냅샷 히스토리 조회",
+        description="문서의 SafeWriter 스냅샷 히스토리(.hwp-mcp-history) 목록을 최신순으로 조회합니다. file_path는 절대 경로 권장.",
+        annotations=_ro_ann,
+        structured_output=False,
     )
     async def hwp_history(file_path: str) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
         snapshots = writer.list_snapshots(target)
         return _json_dumps(
             {
@@ -527,8 +663,11 @@ def create_server(
             }
         )
 
-    @mcp.tool(
-        description="hwp_history에서 확인한 snapshot_id 로 문서를 복원합니다. 복원 전 현재 파일도 스냅샷으로 백업한 뒤 원자 교체합니다."
+    @write_tool(
+        title="스냅샷 복원",
+        description="hwp_history에서 확인한 snapshot_id 로 문서를 복원합니다. 복원 전 현재 파일도 스냅샷으로 백업한 뒤 원자 교체합니다. file_path는 절대 경로 권장.",
+        annotations=_rw_ann,
+        structured_output=False,
     )
     async def hwp_restore(
         file_path: str,
@@ -536,7 +675,7 @@ def create_server(
         expected_sha256: Optional[str] = None,
         force: bool = False,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
         snap_path = writer.resolve_snapshot(target, snapshot_id)
 
         async def _do_restore(_src: Path, tmp_out: Path) -> Dict[str, Any]:
@@ -553,7 +692,10 @@ def create_server(
         return _json_dumps(result)
 
     @mcp.tool(
-        description="두 문서 파일(file_path_a vs file_path_b) 또는 현재 문서와 스냅샷(snapshot_id) 간의 텍스트 unified diff 를 반환합니다."
+        title="문서 텍스트 비교",
+        description="두 문서 파일(file_path_a vs file_path_b) 또는 현재 문서와 스냅샷(snapshot_id) 간의 텍스트 unified diff 를 반환합니다. file_path_a는 절대 경로 권장.",
+        annotations=_ro_ann,
+        structured_output=False,
     )
     async def hwp_diff(
         file_path_a: str,
@@ -561,9 +703,9 @@ def create_server(
         snapshot_id: Optional[str] = None,
         password: Optional[str] = None,
     ) -> str:
-        path_a = _resolve_existing_file(file_path_a)
+        path_a = _resolve_path(file_path_a, must_exist=True)
         if file_path_b:
-            path_b = _resolve_existing_file(file_path_b)
+            path_b = _resolve_path(file_path_b, must_exist=True)
             label_b = str(path_b)
         elif snapshot_id:
             path_b = writer.resolve_snapshot(path_a, snapshot_id)
@@ -593,21 +735,25 @@ def create_server(
                 lineterm="",
             )
         )
-        return _json_dumps(
+        return _limit_response(
             {
                 "file_path_a": str(path_a),
                 "compared_with": label_b,
                 "identical": len(diff_lines) == 0,
                 "diff": "\n".join(diff_lines),
-            }
+            },
+            server_max_chars,
         )
 
     @mcp.tool(
+        title="rhwp 도구 직접 호출",
         description=(
             "rhwp 가 제공하는 180여 개 전체 도구 중 하나를 직접 호출하는 탈출구입니다. "
-            "쓰기 계열 도구(is_write=True 또는 hwp_set_*/hwp_insert_*/hwp_delete_*/hwp_replace_* 등)는 "
-            "반드시 SafeWriter를 경유해 임시 파일 출력·검증·원자 교체를 수행합니다."
-        )
+            "output 인자를 받는 쓰기 도구는 SafeWriter를 경유해 임시 파일 출력·검증·원자 교체를 수행합니다. "
+            "file_path는 절대 경로 권장."
+        ),
+        annotations=_rhwp_ann,
+        structured_output=False,
     )
     async def hwp_rhwp_call(
         file_path: str,
@@ -618,14 +764,27 @@ def create_server(
         force: bool = False,
         allow_loss: bool = False,
     ) -> str:
-        target = _resolve_existing_file(file_path)
+        target = _resolve_path(file_path, must_exist=True)
         args = dict(arguments or {})
+        if "path" in args and args["path"] is not None:
+            args["path"] = str(_resolve_path(str(args["path"]), must_exist=True))
 
-        if _is_write_tool(tool_name, is_write):
+        async def _run_safewrite() -> str:
+            if read_only:
+                raise PermissionError(f"읽기 전용 모드에서는 쓰기 도구 '{tool_name}' 를 실행할 수 없습니다.")
+
             async def _do_write(src: Path, tmp_out: Path) -> Dict[str, Any]:
                 call_args = dict(args)
-                call_args["path"] = str(src)
-                call_args["output"] = str(tmp_out)
+                if tool_name == "hwp_run_plan" and isinstance(call_args.get("plan"), dict):
+                    bound_plan = dict(call_args["plan"])
+                    bound_plan.setdefault("planVersion", 1)
+                    bound_plan["input"] = str(src)
+                    bound_plan["output"] = str(tmp_out)
+                    bound_plan["dryRun"] = False
+                    call_args["plan"] = bound_plan
+                else:
+                    call_args["path"] = str(src)
+                    call_args["output"] = str(tmp_out)
                 res = await rhwp.call_tool(tool_name, call_args)
                 return res if isinstance(res, dict) else {"result": res}
 
@@ -638,10 +797,35 @@ def create_server(
             )
             return _json_dumps(result)
 
+        if is_write or tool_name == "hwp_run_plan":
+            return await _run_safewrite()
+
+        output_tools = await _get_output_tools()
+        if tool_name in output_tools:
+            raw_output = args.get("output")
+            if raw_output is None or str(raw_output).strip() == "":
+                return await _run_safewrite()
+
+            out_path = _resolve_path(str(raw_output), must_exist=False)
+            if out_path == target:
+                return await _run_safewrite()
+
+            if out_path.is_file():
+                raise FileExistsError(f"출력 경로에 이미 파일이 존재합니다 (덮어쓰기 방지): {out_path}")
+
+            writer.record_seen(target)
+            args.setdefault("path", str(target))
+            args["output"] = str(out_path)
+            res = await rhwp.call_tool(tool_name, args)
+            return _json_dumps(res)
+
         writer.record_seen(target)
         args.setdefault("path", str(target))
         res = await rhwp.call_tool(tool_name, args)
         return _json_dumps(res)
+
+    for tool in mcp._tool_manager._tools.values():
+        tool.parameters = _simplify_schema(tool.parameters)
 
     return mcp, rhwp, writer
 
