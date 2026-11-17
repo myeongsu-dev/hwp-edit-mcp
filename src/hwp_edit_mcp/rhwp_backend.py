@@ -6,13 +6,14 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+from hwp_edit_mcp.rhwp_install import ensure_rhwp
 
 logger = logging.getLogger("hwp-edit-mcp.rhwp-backend")
 
@@ -27,35 +28,6 @@ class RhwpToolError(RhwpError):
     def __init__(self, message: str, data: Optional[Any] = None):
         super().__init__(message)
         self.data = data
-
-
-def find_rhwp_exe(explicit_path: Optional[str] = None) -> Path:
-    """Locate rhwp.exe via explicit path, RHWP_EXE env, D:/40_Tools/rhwp, or PATH."""
-    candidates: List[Path] = []
-    if explicit_path:
-        candidates.append(Path(explicit_path))
-    env_exe = os.environ.get("RHWP_EXE")
-    if env_exe:
-        candidates.append(Path(env_exe))
-
-    for cand in candidates:
-        if cand.is_file():
-            return cand.resolve()
-
-    default_root = Path("D:/40_Tools/rhwp")
-    if default_root.is_dir():
-        for match in sorted(default_root.rglob("rhwp.exe")):
-            if match.is_file():
-                return match.resolve()
-
-    which_hit = shutil.which("rhwp.exe") or shutil.which("rhwp")
-    if which_hit:
-        return Path(which_hit).resolve()
-
-    raise FileNotFoundError(
-        "rhwp.exe 를 찾을 수 없습니다. RHWP_EXE 환경변수를 설정하거나 "
-        "D:/40_Tools/rhwp/ 아래에 rhwp.exe 를 배치하세요."
-    )
 
 
 def _parse_tool_output(raw_text: str) -> Any:
@@ -76,12 +48,18 @@ class RhwpBackend:
     """
 
     def __init__(self, exe_path: Optional[str] = None, default_timeout: float = 30.0):
-        self.exe_path = find_rhwp_exe(exe_path)
+        self._explicit = exe_path
+        self.exe_path: Optional[Path] = None
         self.default_timeout = default_timeout
         self._lock = asyncio.Lock()
         self._worker_task: Optional[asyncio.Task[None]] = None
         self._queue: Optional[asyncio.Queue[Tuple[str, Any, asyncio.Future[Any]]]] = None
         self._server_info: Optional[Dict[str, Any]] = None
+
+    async def _ensure_exe(self) -> Path:
+        if self.exe_path is None:
+            self.exe_path = await asyncio.to_thread(ensure_rhwp, self._explicit)
+        return self.exe_path
 
     @property
     def is_connected(self) -> bool:
@@ -92,12 +70,13 @@ class RhwpBackend:
         if self.is_connected:
             return
 
+        exe = await self._ensure_exe()
         queue: asyncio.Queue[Tuple[str, Any, asyncio.Future[Any]]] = asyncio.Queue()
         ready_fut: asyncio.Future[Dict[str, Any]] = asyncio.get_running_loop().create_future()
 
         async def _worker() -> None:
             params = StdioServerParameters(
-                command=str(self.exe_path),
+                command=str(exe),
                 args=["mcp-serve"],
                 env=os.environ.copy(),
             )
@@ -235,7 +214,8 @@ class RhwpBackend:
         if sys.platform == "win32":
             kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
 
-        proc = await asyncio.create_subprocess_exec(str(self.exe_path), *args, **kwargs)
+        exe = await self._ensure_exe()
+        proc = await asyncio.create_subprocess_exec(str(exe), *args, **kwargs)
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
         except asyncio.TimeoutError as exc:
