@@ -9,6 +9,7 @@ import pytest
 
 # Real documents are personal, so they live in a git-ignored folder (or HWP_TEST_SAMPLES).
 DEFAULT_SAMPLES_DIR = Path(__file__).resolve().parent / "local_samples"
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def get_samples_dir() -> Path:
@@ -17,6 +18,22 @@ def get_samples_dir() -> Path:
 
 @pytest.fixture
 def sample_hwp_copy(tmp_path: Path) -> Path:
+    src = FIXTURES_DIR / "sample_form.hwp"
+    dst = tmp_path / src.name
+    shutil.copy2(src, dst)
+    return dst
+
+
+@pytest.fixture
+def sample_hwpx_copy(tmp_path: Path) -> Path:
+    src = FIXTURES_DIR / "sample_form.hwpx"
+    dst = tmp_path / src.name
+    shutil.copy2(src, dst)
+    return dst
+
+
+@pytest.fixture
+def personal_hwp_copy(tmp_path: Path) -> Path:
     samples_dir = get_samples_dir()
     if not samples_dir.is_dir():
         pytest.skip(f"HWP_TEST_SAMPLES directory not found: {samples_dir}")

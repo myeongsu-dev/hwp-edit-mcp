@@ -70,7 +70,7 @@ def test_mcp_e2e_tools_and_edit_workflow(sample_hwp_copy: Path, tmp_path: Path):
                     {
                         "file_path": str(sample_hwp_copy),
                         "table_index": 0,
-                        "cells": [{"row": 0, "col": 1, "text": "E2E테스트팀"}],
+                        "cells": [{"row": 2, "col": 1, "text": "010-1234-5678"}],
                         "expected_sha256": sha_initial,
                     },
                 )
@@ -85,42 +85,35 @@ def test_mcp_e2e_tools_and_edit_workflow(sample_hwp_copy: Path, tmp_path: Path):
                     {
                         "file_path": str(sample_hwp_copy),
                         "table_index": 0,
-                        "cells": [{"label": "팀명(팀장 이름)", "text": "라벨테스트팀", "direction": "right"}],
+                        "cells": [{"label": "성명", "text": "홍길동", "direction": "right"}],
                     },
                 )
                 assert not res_label.isError
                 label_data = json.loads(res_label.content[0].text)
                 assert label_data["changed"] is True
 
-                # 4b-2. label lookup with no table given searches every table
-                tbl0 = json.loads(
-                    (
-                        await session.call_tool(
-                            "hwp_table_view", {"file_path": str(sample_hwp_copy), "table_index": 0}
-                        )
-                    ).content[0].text
-                )["table"]
-                tbl2 = json.loads(
-                    (
-                        await session.call_tool(
-                            "hwp_table_view", {"file_path": str(sample_hwp_copy), "table_index": 2}
-                        )
-                    ).content[0].text
-                )["table"]
-                first_texts = {c.get("text", "").strip() for c in tbl0.get("cells", [])}
-                tbl2_cols = tbl2.get("cols", 0)
-                other_label = next(
-                    c["text"].strip()
-                    for c in tbl2.get("cells", [])
-                    if c.get("text", "").strip()
-                    and c["text"].strip() not in first_texts
-                    and (c["col"] + c.get("colSpan", 1)) < tbl2_cols
-                )
+                # 4b-2. label lookup with no table_index searches available tables
                 res_any = await session.call_tool(
                     "hwp_fill_cells",
-                    {"file_path": str(sample_hwp_copy), "cells": [{"label": other_label, "text": "전체표검색"}]},
+                    {
+                        "file_path": str(sample_hwp_copy),
+                        "cells": [{"label": "소속", "text": "오픈소스팀", "direction": "right"}],
+                    },
                 )
                 assert not res_any.isError, res_any.content[0].text
+                any_data = json.loads(res_any.content[0].text)
+                assert any_data["changed"] is True
+
+                # 4b-3. hwp_replace_text
+                res_rep = await session.call_tool(
+                    "hwp_replace_text",
+                    {
+                        "file_path": str(sample_hwp_copy),
+                        "find": "참가 신청서",
+                        "replace": "참가 확인서",
+                    },
+                )
+                assert not res_rep.isError, res_rep.content[0].text
 
                 # 4c. hwp_rhwp_call (read escape hatch)
                 res_wc = await session.call_tool(
@@ -161,7 +154,10 @@ def test_mcp_e2e_tools_and_edit_workflow(sample_hwp_copy: Path, tmp_path: Path):
                     "hwp_get_text", {"file_path": str(sample_hwp_copy), "format": "text"}
                 )
                 assert not res_txt.isError
-                assert "라벨테스트팀" in res_txt.content[0].text
+                assert "홍길동" in res_txt.content[0].text
+                assert "오픈소스팀" in res_txt.content[0].text
+                assert "010-1234-5678" in res_txt.content[0].text
+                assert "참가 확인서" in res_txt.content[0].text
 
                 # 6. hwp_history & hwp_diff against snapshot
                 res_hist = await session.call_tool("hwp_history", {"file_path": str(sample_hwp_copy)})
@@ -176,7 +172,7 @@ def test_mcp_e2e_tools_and_edit_workflow(sample_hwp_copy: Path, tmp_path: Path):
                 )
                 diff_data = json.loads(res_diff.content[0].text)
                 assert diff_data["identical"] is False
-                assert "라벨테스트팀" in diff_data["diff"]
+                assert "홍길동" in diff_data["diff"]
 
                 # 7. hwp_render_page (svg)
                 render_dir = tmp_path / "render_out"
@@ -201,6 +197,92 @@ def test_mcp_e2e_tools_and_edit_workflow(sample_hwp_copy: Path, tmp_path: Path):
                 assert not res_rest.isError
                 rest_data = json.loads(res_rest.content[0].text)
                 assert rest_data["new_sha256"] == sha_initial
+
+    asyncio.run(_run())
+
+
+def test_mcp_e2e_hwpx_core_workflow(sample_hwpx_copy: Path):
+    async def _run():
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=SERVER_ARGS,
+        )
+        async with stdio_client(params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+
+                # 1. hwp_info
+                res_info = await session.call_tool("hwp_info", {"file_path": str(sample_hwpx_copy)})
+                assert not res_info.isError
+                info_data = json.loads(res_info.content[0].text)
+                assert info_data["format"] == "hwpx"
+
+                # 2. hwp_fill_cells (label-based)
+                res_fill = await session.call_tool(
+                    "hwp_fill_cells",
+                    {
+                        "file_path": str(sample_hwpx_copy),
+                        "cells": [{"label": "성명", "text": "김철수", "direction": "right"}],
+                    },
+                )
+                assert not res_fill.isError, res_fill.content[0].text
+                fill_data = json.loads(res_fill.content[0].text)
+                assert fill_data["changed"] is True
+
+                # 3. hwp_get_text confirms edit
+                res_txt = await session.call_tool(
+                    "hwp_get_text", {"file_path": str(sample_hwpx_copy), "format": "text"}
+                )
+                assert not res_txt.isError
+                assert "김철수" in res_txt.content[0].text
+
+    asyncio.run(_run())
+
+
+def test_mcp_e2e_personal_multi_table_label_lookup(personal_hwp_copy: Path):
+    async def _run():
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=SERVER_ARGS,
+        )
+        async with stdio_client(params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+
+                tbl0 = json.loads(
+                    (
+                        await session.call_tool(
+                            "hwp_table_view", {"file_path": str(personal_hwp_copy), "table_index": 0}
+                        )
+                    ).content[0].text
+                )["table"]
+                tbl2 = json.loads(
+                    (
+                        await session.call_tool(
+                            "hwp_table_view", {"file_path": str(personal_hwp_copy), "table_index": 2}
+                        )
+                    ).content[0].text
+                )["table"]
+                first_texts = {c.get("text", "").strip() for c in tbl0.get("cells", [])}
+                tbl2_cols = tbl2.get("cols", 0)
+                other_label = next(
+                    c["text"].strip()
+                    for c in tbl2.get("cells", [])
+                    if c.get("text", "").strip()
+                    and c["text"].strip() not in first_texts
+                    and (c["col"] + c.get("colSpan", 1)) < tbl2_cols
+                )
+                res_any = await session.call_tool(
+                    "hwp_fill_cells",
+                    {"file_path": str(personal_hwp_copy), "cells": [{"label": other_label, "text": "전체표검색"}]},
+                )
+                assert not res_any.isError, res_any.content[0].text
+
+                res_txt = await session.call_tool(
+                    "hwp_get_text", {"file_path": str(personal_hwp_copy), "format": "text"}
+                )
+                assert not res_txt.isError
+                assert "전체표검색" in res_txt.content[0].text
 
     asyncio.run(_run())
 
