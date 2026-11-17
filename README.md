@@ -63,7 +63,7 @@ claude mcp add -s user hwp -- uvx hwp-edit-mcp
 
 ## 감사의 말
 
-이 프로젝트는 [jkf87/hwp-mcp](https://github.com/jkf87/hwp-mcp)에서 출발했습니다. "AI 에이전트가 MCP로 한글 문서를 다룬다"는 아이디어와 처음 구조는 jkf87 님의 저장소에서 왔습니다. 그 저장소를 포크해 쓰다가, 한컴오피스 없이 여러 OS에서 돌아가도록 [rhwp](https://github.com/edwardkim/rhwp) 엔진 기반으로 새로 작성해 독립 프로젝트가 되었습니다. 길을 먼저 열어 주신 jkf87 님과 rhwp를 만든 edwardkim 님께 감사드립니다.
+[jkf87/hwp-mcp](https://github.com/jkf87/hwp-mcp)를 포크해 시작했고, [rhwp](https://github.com/edwardkim/rhwp) 엔진 기반으로 다시 작성했습니다.
 
 ## 라이선스
 

@@ -63,7 +63,7 @@ Every write tool runs inside a `SafeWriter` transaction:
 
 ## Acknowledgments
 
-This project began as a fork of [jkf87/hwp-mcp](https://github.com/jkf87/hwp-mcp). The idea of letting AI agents work with Hangul documents over MCP, and the initial structure, came from jkf87's repository. It was later rewritten on the [rhwp](https://github.com/edwardkim/rhwp) engine so it runs on any OS without Hancom Office, and became an independent project. Many thanks to jkf87 for paving the way and to edwardkim for rhwp.
+Originally forked from [jkf87/hwp-mcp](https://github.com/jkf87/hwp-mcp) and rewritten on the [rhwp](https://github.com/edwardkim/rhwp) engine.
 
 ## License
 
