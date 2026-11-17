@@ -93,15 +93,28 @@ def test_mcp_e2e_tools_and_edit_workflow(sample_hwp_copy: Path, tmp_path: Path):
                 assert label_data["changed"] is True
 
                 # 4b-2. label lookup with no table given searches every table
-                all_tables = json.loads(
-                    (await session.call_tool("hwp_table_view", {"file_path": str(sample_hwp_copy)})).content[0].text
-                )["tables"]
-                first_texts = {c.get("text", "").strip() for c in all_tables[0].get("cells", [])}
+                tbl0 = json.loads(
+                    (
+                        await session.call_tool(
+                            "hwp_table_view", {"file_path": str(sample_hwp_copy), "table_index": 0}
+                        )
+                    ).content[0].text
+                )["table"]
+                tbl2 = json.loads(
+                    (
+                        await session.call_tool(
+                            "hwp_table_view", {"file_path": str(sample_hwp_copy), "table_index": 2}
+                        )
+                    ).content[0].text
+                )["table"]
+                first_texts = {c.get("text", "").strip() for c in tbl0.get("cells", [])}
+                tbl2_cols = tbl2.get("cols", 0)
                 other_label = next(
                     c["text"].strip()
-                    for t in all_tables[1:]
-                    for c in t.get("cells", [])
-                    if c.get("text", "").strip() and c["text"].strip() not in first_texts
+                    for c in tbl2.get("cells", [])
+                    if c.get("text", "").strip()
+                    and c["text"].strip() not in first_texts
+                    and (c["col"] + c.get("colSpan", 1)) < tbl2_cols
                 )
                 res_any = await session.call_tool(
                     "hwp_fill_cells",
@@ -115,6 +128,33 @@ def test_mcp_e2e_tools_and_edit_workflow(sample_hwp_copy: Path, tmp_path: Path):
                     {"file_path": str(sample_hwp_copy), "tool_name": "hwp_word_count"},
                 )
                 assert not res_wc.isError
+
+                # 4d. hwp_rhwp_call (write escape hatch detected via output schema property)
+                hist_before = json.loads(
+                    (await session.call_tool("hwp_history", {"file_path": str(sample_hwp_copy)})).content[0].text
+                )["count"]
+                res_bm = await session.call_tool(
+                    "hwp_rhwp_call",
+                    {
+                        "file_path": str(sample_hwp_copy),
+                        "tool_name": "hwp_add_bookmark",
+                        "arguments": {"name": "e2e_bm", "section": 0, "paragraph": 0, "offset": 0},
+                    },
+                )
+                assert not res_bm.isError, res_bm.content[0].text
+                bm_data = json.loads(res_bm.content[0].text)
+                assert "new_sha256" in bm_data
+                hist_after = json.loads(
+                    (await session.call_tool("hwp_history", {"file_path": str(sample_hwp_copy)})).content[0].text
+                )["count"]
+                assert hist_after == hist_before + 1
+
+                # 4e. Explicit null for optional parameter works end-to-end
+                res_null = await session.call_tool(
+                    "hwp_info",
+                    {"file_path": str(sample_hwp_copy), "password": None},
+                )
+                assert not res_null.isError, res_null.content[0].text
 
                 # 5. hwp_get_text confirms edit
                 res_txt = await session.call_tool(
